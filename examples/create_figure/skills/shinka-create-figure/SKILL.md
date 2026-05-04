@@ -77,7 +77,7 @@ Because Shinka proposal LLMs cannot dynamically inspect arbitrary disk data duri
 
 Generate `evaluate.py` that:
 
-1. loads environment variables from a `.env` file at the workspace (search current dir + parents), so `GEMINI_API_KEY` is picked up automatically,
+1. loads environment variables from a `.env` file at the workspace (search current dir + parents), so LLM credentials are picked up automatically,
 2. imports the candidate from `program_path`,
 3. calls `make_figure(output_path)`,
 4. catches runtime errors and returns clear feedback,
@@ -129,7 +129,7 @@ Pluggable. The recommended path is the Gemini multimodal API (image bytes + prom
 - reads the rendered PNG,
 - passes the image plus the rubric and context through the LLM client,
 - requests structured JSON output following the rubric's scoring fields,
-- pulls credentials from `GEMINI_API_KEY` (loaded from `.env`).
+- pulls credentials from `.env`.
 
 **Client preference order** (the evaluator template should try in this order at scaffold time and pick the first available path):
 
@@ -142,13 +142,14 @@ Detect support by checking whether the native client exposes a multimodal conten
 
 1. Gather the research context and figure description from the user — via conversation, provided files, or a mix.
 2. Apply defaults for all unspecified inputs (audience, data policy, judge model). Record which defaults were applied.
-3. Create a **dedicated task workspace directory** for all scaffolded
+3. Use `uv` for package management unless the user or project explicitly uses something else.
+4. Create a **dedicated task workspace directory** for all scaffolded
    files (e.g. `shinka_tasks/<figure_name>/`). All generated files —
    `initial.py`, `evaluate.py`, `context.md`, `rubric.md`,
    `shinka.yaml`, and the evolution `results/` directory — live here.
    Ensure a `.env` with the necessary API keys is reachable (in the
    workspace dir or any parent).
-4. Copy `templates/seed_figure_template.py` → `initial.py`. The seed
+5. Copy `templates/seed_figure_template.py` → `initial.py`. The seed
    includes both SVG helpers and a matplotlib path. Do not delete either
    path — candidates may combine SVG elements and matplotlib plots in a
    single figure.
@@ -160,15 +161,15 @@ Detect support by checking whether the native client exposes a multimodal conten
    The seed must start as a neutral placeholder so evolution discovers
    what to draw from scratch rather than inheriting the agent's prior
    knowledge of the task.
-5. Copy `templates/evaluator_template.py` → `evaluate.py`. The evaluator already loads `.env` and reads `context.md` + `rubric.md` from the workspace.
-6. Write the gathered research context to `context.md`.
-7. Copy `templates/rubric_template.md` → `rubric.md` and fill in every section using the user's figure description plus defaults. Add a final "Defaults used" section.
-8. Copy `templates/shinka_config_template.yaml` → `shinka.yaml`
+6. Copy `templates/evaluator_template.py` → `evaluate.py`. The evaluator already loads `.env` and reads `context.md` + `rubric.md` from the workspace.
+7. Write the gathered research context to `context.md`.
+8. Copy `templates/rubric_template.md` → `rubric.md` and fill in every section using the user's figure description plus defaults. Add a final "Defaults used" section.
+9. Copy `templates/shinka_config_template.yaml` → `shinka.yaml`
    (optional; user may instead use `shinka-run` defaults). Ensure
    `use_text_feedback: true` is set so that the `text_feedback` string
    from each evaluation is forwarded to the proposal LLM as
    natural-language guidance.
-9. Smoke-test and **tune the evaluator judge**. The evaluator is the most
+10. Smoke-test and **tune the evaluator judge**. The evaluator is the most
    important part of this workflow — it must be carefully crafted before
    moving on to the actual evolution run.
 
@@ -205,7 +206,7 @@ Detect support by checking whether the native client exposes a multimodal conten
      directions. This calibration is essential — a lenient judge produces
      a flat fitness landscape where evolution cannot find a gradient.
 
-10. **2-generation smoke run** before the full evolution batch. Run
+11. **2-generation smoke run** before the full evolution batch. Run
     Shinka for exactly 2 generations to confirm the end-to-end pipeline
     works (proposal LLM → evaluator → judge → metrics → next proposal):
 
@@ -219,10 +220,10 @@ Detect support by checking whether the native client exposes a multimodal conten
     before proceeding. Monitor logs and interrupt (`Ctrl-C`) if Shinka
     appears stuck in a retry loop.
 
-11. Hand off to `shinka-run` for the full evolution batch. Monitor the
+12. Hand off to `shinka-run` for the full evolution batch. Monitor the
     log during the run — ShinkaEvolve may silently retry on LLM errors
     instead of exiting. Interrupt and fix if the run appears stuck.
-12. After a run, use `shinka-inspect` to extract top candidates and
+13. After a run, use `shinka-inspect` to extract top candidates and
     re-render them. Provide a **concise post-run summary** including:
 
     - Per-generation / per-proposal scoring trajectory (how
