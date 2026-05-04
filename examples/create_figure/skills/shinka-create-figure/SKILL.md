@@ -9,7 +9,7 @@ Use this skill to set up a ShinkaEvolve task where the evolving program is a sin
 
 ## Composition With Existing Shinka Skills
 
-The core ShinkaEvolve skills live in the `skills/` directory of the ShinkaEvolve repo. If the skills are not already loaded by the agent, look for them either in a local ShinkaEvolve clone or from ShinkaEvolve installed via a package manager (e.g. `pip install shinka-evolve`).
+The core ShinkaEvolve skills live in the `skills/` directory of the ShinkaEvolve repo. If the skills are not already loaded by the agent, first check whether a source clone of ShinkaEvolve exists in the current project or directory tree. If not found, install via `uv pip install shinka-evolve` (prefer `uv` for package management unless the user or project explicitly uses something else).
 
 This skill is a domain-specific **setup layer**. It does not replace the core skills:
 
@@ -48,6 +48,7 @@ Everything else has a default and is **only asked back to the user if they want 
 | Figure type | Candidates may combine SVG primitives and matplotlib in a single program to create rich figures. Default seed starts with matplotlib; the SVG helpers are always available and can be mixed in. |
 | Judge model | `gemini-3-flash-preview` |
 | Judge provider | Gemini (multimodal) |
+| Proposal LLM models | `gemini-3-flash-preview` only. Confirm with the user before adding other models (e.g. OpenAI, Anthropic) — each requires its own API key and adds cost. |
 
 When scaffolding from just the gathered context and `.env`, populate the rubric and seed using these defaults and **note in `rubric.md` and the final report which defaults were used** so the user can override later without re-running the skill.
 
@@ -133,13 +134,36 @@ Detect support by checking whether the native client exposes a multimodal conten
 6. Write the gathered research context to `context.md`.
 7. Copy `templates/rubric_template.md` → `rubric.md` and fill in every section using the user's figure description plus defaults. Add a final "Defaults used" section.
 8. Copy `templates/shinka_config_template.yaml` → `shinka.yaml` (optional; user may instead use `shinka-run` defaults).
-9. Smoke-test:
+9. Smoke-test and **tune the evaluator judge**. The evaluator is the most
+   important part of this workflow — it must be carefully crafted before
+   moving on to the actual evolution run.
 
    ```bash
    python evaluate.py --program_path initial.py --results_dir /tmp/shinka_figure_smoke
    ```
 
-   Confirm: evaluator exits 0, figure exists, rendered PNG exists, `metrics.json` has `combined_score`/`public`/`private`/`extra_data`/`text_feedback`, `correct.json` has `correct`/`error`.
+   Confirm: evaluator exits 0, figure exists, rendered PNG exists,
+   `metrics.json` has `combined_score`/`public`/`private`/`text_feedback`,
+   `correct.json` has `correct`/`error`.
+
+   Then **iterate on the judge prompt and rubric** until scoring is strict
+   enough to produce meaningful feedback signals:
+
+   - Run the evaluator several times. Review the `text_feedback` and
+     per-criterion scores in `public`. A good judge should identify
+     concrete issues (missing elements, clutter, bad contrast) rather than
+     giving blanket high scores.
+   - If the judge is too lenient (e.g. scores ≥ 8/10 on a clearly rough
+     seed figure), tighten the rubric: add explicit deduction rules, raise
+     the bar for what counts as "publication-ready", and sharpen the
+     failure-mode descriptions.
+   - If the judge is too harsh or inconsistent, soften specific criteria or
+     clarify ambiguous rubric language.
+   - Repeat until the seed figure receives a score that honestly reflects
+     its quality and the `text_feedback` gives actionable improvement
+     directions. This calibration is essential — a lenient judge produces
+     a flat fitness landscape where evolution cannot find a gradient.
+
 10. Hand off to `shinka-run` for evolution batches.
 11. After a run, use `shinka-inspect` to extract top candidates and re-render them. Add a short figure-specific report (top images, judge rationale, caveats including the dummy-data label and any defaults used).
 

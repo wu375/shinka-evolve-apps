@@ -1,0 +1,8 @@
+Figure 2 | Expanded view of the AlphaEvolve discovery process. The user provides an initial
+program (with components to evolve marked), evaluation code, and optional configurations
+(Section 2.1). AlphaEvolve then initiates an evolutionary loop. The Prompt sampler uses
+programs from the Program database to construct rich prompts (Section 2.2). Given these
+prompts, the LLMs generate code modifications (diffs), which are applied to create new
+programs (Section 2.3). These are then scored by Evaluators (Section 2.4), and promising
+solutions are registered back into the Program database (Section 2.5), driving the iterative
+discovery of better and better programs.

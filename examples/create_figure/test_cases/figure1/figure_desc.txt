@@ -1,0 +1,1 @@
+Figure 1:High-level overview of ShinkaEvolve. Left: The ShinkaEvolve framework constructs an archive of evaluated programs, rejection-samples new programs, and evaluates their fitness. Right: ShinkaEvolve provides a sample efficient alternative to AlphaEvolve and outperforms its Circle Packing solution.

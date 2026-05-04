@@ -17,9 +17,11 @@ in named subdirectories (see Files section).
 ## Composition With Existing Shinka Skills
 
 The core ShinkaEvolve skills live in the `skills/` directory of the
-ShinkaEvolve repo. If the skills are not already loaded by the agent, look
-for them either in a local ShinkaEvolve clone or from ShinkaEvolve
-installed via a package manager (e.g. `pip install shinka-evolve`).
+ShinkaEvolve repo. If the skills are not already loaded by the agent,
+first check whether a source clone of ShinkaEvolve exists in the current
+project or directory tree. If not found, install via
+`uv pip install shinka-evolve` (prefer `uv` for package management unless
+the user or project explicitly uses something else).
 
 - Use `shinka-setup` for one-shot tasks; this skill *wraps* multiple
   Shinka runs into a self-play loop.
@@ -58,6 +60,12 @@ game runners, seed agents, and baseline bots.
    (e.g. `GEMINI_API_KEY`, `OPENAI_API_KEY`). These are consumed by the
    proposal LLMs during evolution, not by the evaluator — the evaluator
    scores numerically via match results.
+
+## LLM Model Selection
+
+Default to `gemini-3-flash-preview` only for proposal LLMs in
+`shinka.yaml`. Confirm with the user before adding other models (e.g.
+OpenAI, Anthropic) — each requires its own API key and adds cost.
 
 ## Workspace Layout
 

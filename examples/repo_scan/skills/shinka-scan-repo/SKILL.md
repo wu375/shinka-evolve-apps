@@ -13,7 +13,7 @@ evolution, and does not write `EVOLVE-BLOCK` markers into source files.
 
 ## Composition With Existing Shinka Skills
 
-The core ShinkaEvolve skills live in the `skills/` directory of the ShinkaEvolve repo. If the skills are not already loaded by the agent, look for them either in a local ShinkaEvolve clone or from ShinkaEvolve installed via a package manager (e.g. `pip install shinka-evolve`).
+The core ShinkaEvolve skills live in the `skills/` directory of the ShinkaEvolve repo. If the skills are not already loaded by the agent, first check whether a source clone of ShinkaEvolve exists in the current project or directory tree. If not found, install via `uv pip install shinka-evolve` (prefer `uv` for package management unless the user or project explicitly uses something else).
 
 This skill is a **triage front-end** for those native skills. It does not set up tasks itself, does not start
 evolution, and does not write `EVOLVE-BLOCK` markers. It only proposes
