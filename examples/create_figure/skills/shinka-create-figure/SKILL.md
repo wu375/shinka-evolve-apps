@@ -83,7 +83,7 @@ Generate `evaluate.py` that:
 4. catches runtime errors and returns clear feedback,
 5. validates that a renderable image exists (file exists, nonzero size, parses, opens, not blank),
 6. renders SVG → PNG if needed (`cairosvg`),
-7. sends only the rendered PNG plus research context + rubric to the multimodal judge,
+7. sends the rendered PNG **plus** the full research context (`context.md`) and rubric (`rubric.md`) to the multimodal judge — the judge scores how well the image matches the described figure,
 8. parses the structured judge response,
 9. writes Shinka-compatible metrics + correctness outputs.
 
@@ -93,6 +93,20 @@ Required Shinka metrics fields:
 - `public` (dict of per-criterion scores visible to the proposal LLM. Important for providing diagnostic feedback to the proposal LLM)
 - `private` (dict, metrics that are not visible to the proposal LLM)
 - `text_feedback` (string usable for future mutations)
+
+**Proposal LLM visibility:** The proposal LLM sees `public` scores and
+`text_feedback` but does not automatically read `context.md`. Ensure
+the proposal LLM has the figure target by:
+
+1. Embedding the research context and figure description in
+   `shinka.yaml` as the task `problem_statement` (or equivalent field
+   — check `shinka-setup` for the correct key). This appears in every
+   proposal prompt.
+2. Having the evaluator's `text_feedback` always include: the key
+   figure requirements from the description, what the current image is
+   missing or getting wrong, and concrete improvement directions. This
+   makes `text_feedback` a per-iteration guide toward the target, not
+   just a score summary.
 
 Refer to shinka-setup skill for more details on the metrics fields.
 
@@ -128,12 +142,32 @@ Detect support by checking whether the native client exposes a multimodal conten
 
 1. Gather the research context and figure description from the user — via conversation, provided files, or a mix.
 2. Apply defaults for all unspecified inputs (audience, data policy, judge model). Record which defaults were applied.
-3. Create or use the user's task workspace. Ensure a `.env` with the necessary API keys is reachable.
-4. Copy `templates/seed_figure_template.py` → `initial.py`. The seed includes both SVG helpers and a matplotlib path; customize both or either to fit the figure requirements. Do not delete one path — candidates may combine SVG elements and matplotlib plots in a single figure.
+3. Create a **dedicated task workspace directory** for all scaffolded
+   files (e.g. `shinka_tasks/<figure_name>/`). All generated files —
+   `initial.py`, `evaluate.py`, `context.md`, `rubric.md`,
+   `shinka.yaml`, and the evolution `results/` directory — live here.
+   Ensure a `.env` with the necessary API keys is reachable (in the
+   workspace dir or any parent).
+4. Copy `templates/seed_figure_template.py` → `initial.py`. The seed
+   includes both SVG helpers and a matplotlib path. Do not delete either
+   path — candidates may combine SVG elements and matplotlib plots in a
+   single figure.
+
+   **Keep the seed generic.** Do NOT pre-populate it with task-specific
+   shapes, labels, data, or domain knowledge. The figure description and
+   research context belong in `context.md` and `rubric.md` (steps 6–7),
+   where both the evaluator judge and the proposal LLMs can read them.
+   The seed must start as a neutral placeholder so evolution discovers
+   what to draw from scratch rather than inheriting the agent's prior
+   knowledge of the task.
 5. Copy `templates/evaluator_template.py` → `evaluate.py`. The evaluator already loads `.env` and reads `context.md` + `rubric.md` from the workspace.
 6. Write the gathered research context to `context.md`.
 7. Copy `templates/rubric_template.md` → `rubric.md` and fill in every section using the user's figure description plus defaults. Add a final "Defaults used" section.
-8. Copy `templates/shinka_config_template.yaml` → `shinka.yaml` (optional; user may instead use `shinka-run` defaults).
+8. Copy `templates/shinka_config_template.yaml` → `shinka.yaml`
+   (optional; user may instead use `shinka-run` defaults). Ensure
+   `use_text_feedback: true` is set so that the `text_feedback` string
+   from each evaluation is forwarded to the proposal LLM as
+   natural-language guidance.
 9. Smoke-test and **tune the evaluator judge**. The evaluator is the most
    important part of this workflow — it must be carefully crafted before
    moving on to the actual evolution run.
@@ -145,6 +179,13 @@ Detect support by checking whether the native client exposes a multimodal conten
    Confirm: evaluator exits 0, figure exists, rendered PNG exists,
    `metrics.json` has `combined_score`/`public`/`private`/`text_feedback`,
    `correct.json` has `correct`/`error`.
+
+   **Important:** ShinkaEvolve may enter an infinite retry loop when it
+   encounters transient errors (e.g. LLM API failures, rate limits,
+   network issues) rather than exiting immediately. During smoke tests,
+   actively monitor the log output and interrupt (`Ctrl-C`) if the
+   process appears stuck retrying. Fix the underlying issue (wrong API
+   key, quota exhausted, model name typo, etc.) before re-running.
 
    Then **iterate on the judge prompt and rubric** until scoring is strict
    enough to produce meaningful feedback signals:
@@ -164,8 +205,38 @@ Detect support by checking whether the native client exposes a multimodal conten
      directions. This calibration is essential — a lenient judge produces
      a flat fitness landscape where evolution cannot find a gradient.
 
-10. Hand off to `shinka-run` for evolution batches.
-11. After a run, use `shinka-inspect` to extract top candidates and re-render them. Add a short figure-specific report (top images, judge rationale, caveats including the dummy-data label and any defaults used).
+10. **2-generation smoke run** before the full evolution batch. Run
+    Shinka for exactly 2 generations to confirm the end-to-end pipeline
+    works (proposal LLM → evaluator → judge → metrics → next proposal):
+
+    ```bash
+    shinka run --config shinka.yaml --num-generations 2
+    ```
+
+    Confirm both generations produce valid candidates with non-trivial
+    `combined_score` values and readable `text_feedback`. If any
+    generation fails or produces zero-score results, fix the issue
+    before proceeding. Monitor logs and interrupt (`Ctrl-C`) if Shinka
+    appears stuck in a retry loop.
+
+11. Hand off to `shinka-run` for the full evolution batch. Monitor the
+    log during the run — ShinkaEvolve may silently retry on LLM errors
+    instead of exiting. Interrupt and fix if the run appears stuck.
+12. After a run, use `shinka-inspect` to extract top candidates and
+    re-render them. Provide a **concise post-run summary** including:
+
+    - Per-generation / per-proposal scoring trajectory (how
+      `combined_score` and key `public` metrics evolved over
+      generations).
+    - Which proposals improved vs. regressed, and the judge's
+      `text_feedback` highlights for each.
+    - **Pointers to rendered PNG files** for every proposal in every
+      generation, so the user can visually inspect the evolution
+      progression (e.g. `results/<gen>/<proposal>/figure.png`).
+    - Top candidate(s): final score, judge rationale, and the path to
+      their rendered PNG.
+    - Caveats: dummy-data label, any defaults used, and areas the judge
+      flagged as needing human review.
 
 ## Files
 

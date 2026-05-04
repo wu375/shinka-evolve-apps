@@ -164,6 +164,16 @@ Two files in the output directory:
     owns the task scaffold from there, and `shinka-run` / `shinka-inspect`
     take over for execution and review.
 
+## ShinkaEvolve Retry Behavior
+
+ShinkaEvolve may enter an infinite retry loop on transient errors (LLM
+API failures, rate limits, network issues) rather than exiting
+immediately. When running downstream Shinka tasks from scan results,
+actively monitor log output during smoke tests and evolution runs.
+Interrupt (`Ctrl-C`) if the process appears stuck retrying, fix the
+underlying issue (wrong API key, quota exhausted, model name typo,
+etc.), and re-run.
+
 ## Files
 
 - `SKILL.md` — this file.

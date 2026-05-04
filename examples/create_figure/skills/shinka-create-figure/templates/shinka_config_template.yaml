@@ -25,23 +25,24 @@ evo_config:
   patch_type_probs: [0.6, 0.3, 0.1]
   num_generations: 40        # figure judging is expensive; keep low
   max_api_costs: 0.25
+  use_text_feedback: true    # pass text_feedback to proposal LLMs for natural-language guidance
   max_patch_resamples: 3
   max_patch_attempts: 3
   max_novelty_attempts: 3
   job_type: local
   language: python
-  llm_models: ["gemini-3-flash-preview", "gpt-5-mini"]
+  llm_models: ["gemini-3-flash-preview"]  # default: gemini only; confirm with user before adding others
   llm_kwargs:
     temperatures: [0.3, 0.7, 1.0]
     max_tokens: 32768
   meta_rec_interval: 20
-  meta_llm_models: ["gpt-5-mini"]
+  meta_llm_models: ["gemini-3-flash-preview"]  # default: gemini only
   meta_llm_kwargs:
     temperatures: [0]
     max_tokens: 16384
   embedding_model: text-embedding-3-small
   code_embed_sim_threshold: 0.99
-  novelty_llm_models: ["gpt-5-nano"]
+  novelty_llm_models: ["gemini-3-flash-preview"]  # default: gemini only
   novelty_llm_kwargs:
     temperatures: [0]
   init_program_path: initial.py

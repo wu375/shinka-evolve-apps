@@ -67,6 +67,17 @@ Default to `gemini-3-flash-preview` only for proposal LLMs in
 `shinka.yaml`. Confirm with the user before adding other models (e.g.
 OpenAI, Anthropic) — each requires its own API key and adds cost.
 
+## Shinka Config Defaults
+
+- **`parallel_evaluators: 2`** — self-play evaluators tend to be heavy
+  (multiple matches per evaluation). Default to 2 parallel evaluators to
+  avoid overwhelming the machine. Increase only after confirming that
+  CPU / memory headroom exists.
+- **`use_text_feedback: true`** — forward the evaluator's `text_feedback`
+  string to proposal LLMs as natural-language guidance on strengths and
+  failure modes. Essential for game agents where per-criterion
+  breakdowns alone are not enough to guide mutations.
+
 ## Workspace Layout
 
 For each task workspace the skill creates:
@@ -117,7 +128,59 @@ Configurable parameters:
 - `keep_baselines` — true / false (default true).
 - `windowing` — `sliding` (default) or `cumulative` (never drop).
 
-## Evaluator Contract
+## Evaluator Design
+
+The evaluator is the most critical component of the self-play loop. It
+must be **carefully designed and tuned** before starting evolution — a
+poorly calibrated evaluator produces meaningless fitness signals.
+
+### Key Design Decisions
+
+These parameters interact and must be balanced by trial and error:
+
+- **Opponent pool size** — how many bots in `bots/` to play against per
+  evaluation. More opponents = better signal, but linearly increases
+  eval time. Start small (2–3 baselines) and grow via pool rotation.
+- **Opponent diversity** — the pool should cover different play styles
+  (aggressive, defensive, economic, random). A pool of near-identical
+  bots gives redundant signal. When promoting top-K agents between
+  rounds, prefer behaviorally diverse agents over the K highest scorers.
+- **Matches per opponent** — how many repeated games (with different
+  seeds) to play against each opponent. More repeats reduce variance but
+  increase cost. 3–5 seeds per opponent is a reasonable starting point.
+- **Random seeds** — use deterministic seeds for reproducibility. Vary
+  seeds across matches but keep them fixed within a single evaluation so
+  results are comparable across candidates.
+- **Eval time vs. eval quality** — total eval time =
+  `num_opponents × matches_per_opponent × time_per_match`. With
+  `parallel_evaluators: 2`, each evaluation blocks a slot. Budget the
+  per-candidate eval time so a full generation completes in reasonable
+  wall-clock time (minutes, not hours).
+- **Pool update frequency** — how often to rotate new agents into the
+  pool (default: every round). Updating too frequently destabilizes the
+  fitness landscape; too infrequently lets candidates overfit to a stale
+  meta.
+
+### Tuning Workflow
+
+1. Smoke-test the evaluator against the seed agent and baselines.
+2. Review `text_feedback` and per-opponent breakdowns. A good evaluator
+   should produce differentiated scores — not blanket wins or losses.
+3. If eval is too slow, reduce matches per opponent or pool size.
+4. If scores are noisy (high variance across identical runs), increase
+   matches per opponent or add more seeds.
+5. If all candidates score similarly, the pool may lack diversity — add
+   opponents with different strategies.
+6. Repeat until the evaluator reliably distinguishes strong from weak
+   agents in reasonable time.
+
+**Important:** ShinkaEvolve may enter an infinite retry loop on
+transient errors (LLM API failures, rate limits, etc.) rather than
+exiting immediately. During smoke tests and runs, actively monitor the
+log output and interrupt (`Ctrl-C`) if the process appears stuck. Fix
+the underlying issue before re-running.
+
+### Evaluator Contract
 
 The evaluator must:
 
@@ -171,14 +234,34 @@ The candidate must not:
 ## Workflow
 
 1. Collect inputs (game, interface, baselines, schedule).
-2. Create the task workspace. For known games, copy files from the
-   matching game subdirectory. For custom games, the user provides the
-   game runner, seed agent, and baseline bots.
-3. Smoke-test the evaluator against the seed agent.
-4. Run the multi-round self-play loop, delegating each round to
+2. Create a **dedicated task workspace directory** (e.g.
+   `shinka_tasks/<game_name>/`) following the workspace layout above.
+   For known games, copy files from the matching game subdirectory
+   (e.g. `kaggle-orbit-wars/`). For custom games, the user provides
+   the game runner, seed agent, and baseline bots.
+3. Smoke-test the evaluator against the seed agent. Tune evaluator
+   parameters (pool size, matches per opponent, seeds) by trial and
+   error until scoring is reliable and eval time is acceptable.
+   Monitor logs — interrupt if ShinkaEvolve gets stuck retrying.
+4. **2-generation smoke run** before the full self-play loop. Run
+   Shinka for exactly 2 generations on round 1 to confirm the end-to-end
+   pipeline works (proposal LLM → evaluator → match results → metrics
+   → next proposal):
+
+   ```bash
+   shinka run --config shinka.yaml --num-generations 2
+   ```
+
+   Confirm both generations produce valid candidates with differentiated
+   `combined_score` values and readable `text_feedback`. If any
+   generation fails or all candidates score identically, fix the issue
+   before proceeding with the full run. Monitor logs and interrupt
+   (`Ctrl-C`) if Shinka appears stuck in a retry loop.
+
+5. Run the multi-round self-play loop, delegating each round to
    `shinka-run` and using `shinka-inspect` + the rotation policy between
-   rounds.
-5. Final report: top agent across rounds, win-rate summary vs. pool.
+   rounds. Monitor logs during runs for retry loops.
+6. Final report: top agent across rounds, win-rate summary vs. pool.
 
 ## Files
 

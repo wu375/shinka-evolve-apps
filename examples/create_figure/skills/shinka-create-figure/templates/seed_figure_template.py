@@ -12,6 +12,14 @@ Both SVG helpers and matplotlib are available and can be combined in a single
 figure to produce rich visuals — e.g. matplotlib for charts/plots plus SVG
 overlays for annotations, diagrams, or custom vector elements. The final
 output is always PNG.
+
+Keep this seed generic:
+Do NOT customize this seed with task-specific shapes, labels, data, or domain
+knowledge. The figure description and research context belong in `context.md`
+and `rubric.md`, where both the evaluator judge and the proposal LLMs can read
+them. The seed is intentionally blank/neutral so that evolution discovers what
+to draw from a fair starting point, not from the agent's prior knowledge of the
+task.
 """
 
 from __future__ import annotations
