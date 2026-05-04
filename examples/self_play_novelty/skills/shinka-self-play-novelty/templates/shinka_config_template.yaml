@@ -1,0 +1,77 @@
+# Low-budget local Shinka config for self-play novelty image evolution.
+# Adjust paths/model names to match the installed ShinkaEvolve version.
+
+max_evaluation_jobs: 2
+max_proposal_jobs: 3
+max_db_workers: 2
+
+db_config:
+  db_path: evolution_db.sqlite
+  num_islands: 2
+  archive_size: 30
+  elite_selection_ratio: 0.3
+  num_archive_inspirations: 3
+  num_top_k_inspirations: 2
+  migration_interval: 10
+  migration_rate: 0.1
+  island_elitism: true
+  enforce_island_separation: true
+  parent_selection_strategy: weighted
+  parent_selection_lambda: 10
+
+evaluate_function:
+  _target_: evaluate.evaluate_self_play_novelty
+  program_path: ???
+  results_dir: ???
+  opponents_dir: opponents
+  n_opponents: 3
+  n_games: 2
+  base_seed: 42
+  judge_model: gemini-3-flash-preview
+
+evo_config:
+  patch_types: [diff, full, cross]
+  patch_type_probs: [0.6, 0.3, 0.1]
+  num_generations: 30
+  max_api_costs: 0.35
+  use_text_feedback: true
+  max_patch_resamples: 3
+  max_patch_attempts: 3
+  max_novelty_attempts: 3
+  job_type: local
+  language: python
+  llm_models: ["gemini-3-flash-preview"]
+  llm_kwargs:
+    temperatures: [0.3, 0.7, 1.0]
+    max_tokens: 32768
+  meta_rec_interval: 20
+  meta_llm_models: ["gemini-3-flash-preview"]
+  meta_llm_kwargs:
+    temperatures: [0]
+    max_tokens: 16384
+  embedding_model: gemini-embedding-001
+  code_embed_sim_threshold: 0.99
+  novelty_llm_models: ["gemini-3-flash-preview"]
+  novelty_llm_kwargs:
+    temperatures: [0]
+  init_program_path: initial.py
+  llm_dynamic_selection: ucb1
+  llm_dynamic_selection_kwargs:
+    exploration_coef: 1
+  results_dir: results/results_self_play_novelty
+  task_sys_msg: |
+    Write a Python function named "def generate_svg(rng: int) -> str" that
+    returns a complete, self-contained, colored SVG artwork as a string.
+
+    The task is open-ended creative discovery. Evaluation compares your
+    rendered image against a hidden sample of opponent-pool images and asks a
+    multimodal judge to rank all images for divergence, aesthetic coherence,
+    mechanism breadth, surprise, and theme alignment. The judge does not know
+    which image is yours.
+
+    Improve by creating images that are visually compelling, distinct from
+    likely opponents, and rich enough to become strong future opponents. Avoid
+    one-template parameter variation, random clutter, broken SVG, external
+    resources, scripts, foreignObject, or output explosions.
+
+exp_name: shinka_self_play_novelty
