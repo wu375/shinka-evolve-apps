@@ -2,3 +2,4 @@ ShinkaEvolve/
 .env
 *.pyc
 .claude/
+shinka_tasks/
