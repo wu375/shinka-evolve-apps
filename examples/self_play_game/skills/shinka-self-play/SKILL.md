@@ -80,7 +80,11 @@ OpenAI, Anthropic) — each requires its own API key and adds cost.
 
 ## Workspace Layout
 
-For each task workspace the skill creates:
+For each ShinkaEvolve run, create a dedicated scaffold directory under
+`shinka_tasks/`, e.g. `shinka_tasks/<game_name>_self_play/scaffold/`.
+Use this scaffold directory as `<task_workspace>` and run Shinka commands
+from it unless the installed ShinkaEvolve version requires an explicit
+workspace flag.
 
 ```
 <task_workspace>/
@@ -174,11 +178,10 @@ These parameters interact and must be balanced by trial and error:
 6. Repeat until the evaluator reliably distinguishes strong from weak
    agents in reasonable time.
 
-**Important:** ShinkaEvolve may enter an infinite retry loop on
-transient errors (LLM API failures, rate limits, etc.) rather than
-exiting immediately. During smoke tests and runs, actively monitor the
-log output and interrupt (`Ctrl-C`) if the process appears stuck. Fix
-the underlying issue before re-running.
+**Important:** ShinkaEvolve may not exit immediately even when a fatal
+error has occurred. During smoke tests and runs, actively monitor log
+output and interrupt (`Ctrl-C`) if fatal retry output repeats without
+new progress. Fix the underlying issue before re-running.
 
 ### Evaluator Contract
 
@@ -234,15 +237,16 @@ The candidate must not:
 ## Workflow
 
 1. Collect inputs (game, interface, baselines, schedule).
-2. Create a **dedicated task workspace directory** (e.g.
-   `shinka_tasks/<game_name>/`) following the workspace layout above.
-   For known games, copy files from the matching game subdirectory
-   (e.g. `kaggle-orbit-wars/`). For custom games, the user provides
-   the game runner, seed agent, and baseline bots.
+2. Create a **dedicated run scaffold directory** under `shinka_tasks/`
+   (e.g. `shinka_tasks/<game_name>_self_play/scaffold/`) following the
+   workspace layout above. For known games, copy files from the matching
+   game subdirectory (e.g. `kaggle-orbit-wars/`). For custom games, the
+   user provides the game runner, seed agent, and baseline bots.
 3. Smoke-test the evaluator against the seed agent. Tune evaluator
    parameters (pool size, matches per opponent, seeds) by trial and
    error until scoring is reliable and eval time is acceptable.
-   Monitor logs — interrupt if ShinkaEvolve gets stuck retrying.
+   Monitor logs frequently and interrupt if ShinkaEvolve repeats fatal
+   retry output or stops making progress.
 4. **2-generation smoke run** before the full self-play loop. Run
    Shinka for exactly 2 generations on round 1 to confirm the end-to-end
    pipeline works (proposal LLM → evaluator → match results → metrics
@@ -255,12 +259,22 @@ The candidate must not:
    Confirm both generations produce valid candidates with differentiated
    `combined_score` values and readable `text_feedback`. If any
    generation fails or all candidates score identically, fix the issue
-   before proceeding with the full run. Monitor logs and interrupt
-   (`Ctrl-C`) if Shinka appears stuck in a retry loop.
+   before proceeding with the full run.
+
+   **Monitoring requirement:** ShinkaEvolve may not exit immediately
+   even when a fatal error has occurred. Watch progress frequently
+   during smoke and full runs: check logs every 30–60 seconds during
+   startup and smoke runs, then at least every few minutes during
+   longer batches. Kill the run quickly (`Ctrl-C` or terminate the
+   process) if you see repeated fatal errors such as authentication
+   failures, quota exhaustion, invalid model names, import errors, or
+   identical retry messages with no new proposal/evaluation/generation
+   progress. Fix the root cause before re-running.
 
 5. Run the multi-round self-play loop, delegating each round to
    `shinka-run` and using `shinka-inspect` + the rotation policy between
-   rounds. Monitor logs during runs for retry loops.
+   rounds. Apply the same frequent-monitoring rule to every round and
+   kill quickly if progress stalls on fatal retry output.
 6. Final report: top agent across rounds, win-rate summary vs. pool.
 
 ## Files

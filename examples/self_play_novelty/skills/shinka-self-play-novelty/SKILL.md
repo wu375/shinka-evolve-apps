@@ -7,9 +7,10 @@ description: Create ShinkaEvolve tasks for open-ended SVG/image novelty where ca
 
 Use this skill to set up a ShinkaEvolve visual novelty task with a
 self-play-style evaluator. Instead of scoring a candidate image in isolation,
-each evaluation samples opponent images from a fixed pool, shuffles the
-candidate among them, and asks a Gemini multimodal judge to rank every image
-for each rubric criterion.
+each evaluation renders four stochastic samples from the candidate program,
+composes them into a single 2x2 PNG gallery, samples opponent galleries from a
+fixed pool, shuffles the candidate gallery among them, and asks a Gemini
+multimodal judge to rank every gallery for each rubric criterion.
 
 The judge never knows which image is the current candidate.
 
@@ -48,8 +49,9 @@ fixed target image. Use `shinka-setup`, `shinka-self-play`, or
 1. **Creative brief / theme** — open-ended guidance for the visual domain.
 2. **Rubric criteria** — named criteria used by the judge. Defaults:
    divergence, aesthetic coherence, mechanism breadth, surprise, theme alignment.
-3. **Baseline opponent pool** — at least `n_opponents` images in `opponents/`.
-   PNG is preferred; SVG is accepted by the evaluator template.
+3. **Baseline opponent pool** — at least `n_opponents` gallery images in
+   `opponents/`. PNG galleries are preferred; each opponent should represent
+   four samples in a 2x2 grid so candidate and opponent units match.
 4. **Self-play schedule** — rounds, generations per round, promotion count, and
    pool window size.
 5. **A `.env` file** with `GEMINI_API_KEY` for the multimodal judge and any
@@ -72,8 +74,11 @@ def generate_svg(rng: int) -> str:
     """Return a complete, self-contained SVG artwork."""
 ```
 
-The evaluator calls `generate_svg(seed)`, validates the SVG, renders it to PNG,
-and uses that PNG as the hidden target image in each ranking game.
+The evaluator calls `generate_svg(seed)` four times with deterministic seeds,
+validates each SVG, renders each sample to PNG, composes the four PNGs into
+`gallery.png`, and uses that gallery as the hidden target in each ranking game.
+The function should be stochastic with respect to the seed so the gallery shows
+meaningful variation across samples.
 
 SVG constraints:
 
@@ -88,14 +93,17 @@ Generate `evaluate.py` from `templates/evaluator_template.py`. It must:
 
 1. load `.env` from the task workspace or parent directories,
 2. import the candidate from `program_path`,
-3. call `generate_svg(seed)` and render the target PNG,
-4. load a fixed opponent pool from `opponents/` or a frozen
+3. call `generate_svg(seed)` four times, render the sample PNGs, and compose
+   `gallery.png` as a 2x2 candidate gallery,
+4. write the rendered gallery under the evaluation `results_dir` so Shinka runs
+   keep it in the per-generation folder such as `results/gen_x/`,
+5. load a fixed opponent gallery pool from `opponents/` or a frozen
    `pool_snapshot/`,
-5. for each of `n_games`, deterministically sample `n_opponents` opponents,
-   shuffle target + opponents, and preserve that shuffled image order,
-6. send each PNG to Gemini as a separate image part followed by a prompt that
+6. for each of `n_games`, deterministically sample `n_opponents` opponents,
+   shuffle target gallery + opponent galleries, and preserve that shuffled image order,
+7. send each gallery PNG to Gemini as a separate image part followed by a prompt that
    maps those parts to `Image 1`, `Image 2`, ... in order,
-7. parse JSON ranks shaped like:
+8. parse JSON ranks shaped like:
 
 ```json
 {
@@ -133,14 +141,16 @@ Return Shinka-compatible metrics:
   },
   "private": {
     "games": [],
-    "pool_size": 0
+    "pool_size": 0,
+    "target_gallery": "results/gen_x/gallery.png"
   },
   "text_feedback": "concise score summary and improvement directions"
 }
 ```
 
 The proposal LLM should see `public` scores and `text_feedback`, but not the
-hidden target index or opponent identities.
+hidden target index or opponent identities. Use `extra_data.image_path` for the
+candidate gallery PNG, not an individual sample.
 
 ## Opponent Pool Policy
 
@@ -149,18 +159,58 @@ The pool is fixed within each ShinkaEvolve run and updated only between runs.
 Workspace layout:
 
 ```text
+shinka_tasks/<theme_name>_self_play_novelty/
+  scaffold/
+    initial.py
+    evaluate.py
+    rubric.md
+    shinka.yaml
+    run_self_play_novelty.py
+    opponents/
+      baseline_001.png  # 2x2 gallery
+      baseline_002.png  # 2x2 gallery
+    results/
+      gen_x/
+        gallery.png
+        sample_01.png
+        sample_02.png
+        sample_03.png
+        sample_04.png
+  rounds/
+    round_001/
+      pool_snapshot/
+      promoted/
+```
+
+Use `scaffold/` as the ShinkaEvolve working directory unless the installed
+version requires an explicit workspace flag. The `results/gen_x/` folders are
+created under `scaffold/` so each generation keeps its rendered gallery PNG.
+
+Legacy flat layouts are acceptable only when adapting an existing task; new
+scaffolds should use the `shinka_tasks/<task>/scaffold/` convention above.
+
+For compact examples, `<task_workspace>` below refers to that `scaffold/`
+directory:
+
+```text
 <task_workspace>/
   initial.py
   evaluate.py
   rubric.md
   shinka.yaml
   opponents/
-    baseline_001.png
-    baseline_002.png
+    baseline_001.png  # 2x2 gallery
+    baseline_002.png  # 2x2 gallery
   rounds/
     round_001/
       pool_snapshot/
       results/
+        gen_x/
+          gallery.png
+          sample_01.png
+          sample_02.png
+          sample_03.png
+          sample_04.png
       promoted/
 ```
 
@@ -169,12 +219,12 @@ For round `N`:
 1. copy `opponents/` to `rounds/round_N/pool_snapshot/`,
 2. configure the evaluator to read that snapshot,
 3. run one ShinkaEvolve batch,
-4. collect top candidate images from the round results,
-5. promote top-K images into `opponents/`,
+4. collect top candidate gallery PNGs from the round results,
+5. promote top-K gallery PNGs into `opponents/`,
 6. apply a fixed-size sliding window to old non-baseline opponents.
 
-Baseline images should be marked with a `baseline_` prefix and kept forever.
-Promoted images should include round and rank in their filename.
+Baseline gallery images should be marked with a `baseline_` prefix and kept
+forever. Promoted galleries should include round and rank in their filename.
 
 ## Tuning Guidance
 
@@ -182,19 +232,27 @@ The evaluator is the fitness landscape. Tune it before running a full batch.
 
 - If scores are too flat, increase rubric specificity or add stronger/diverse
   baselines.
-- If judging is too slow, reduce `n_games` before reducing `n_opponents`.
+- If judging is too slow, reduce `n_games` before reducing `n_opponents`; keep
+  the four-sample gallery so stochastic programs are judged consistently.
 - If candidates overfit to one style, rotate in behaviorally different promoted
   images, not only visually similar winners.
 - Keep sampling seeded. Identical evaluator inputs should produce the same
   opponent samples and image order.
 
 During smoke tests and runs, monitor logs. ShinkaEvolve may retry indefinitely
-on transient LLM API failures, quota issues, or bad model names.
+or fail to exit quickly even when a fatal error has occurred, including on
+transient LLM API failures, quota issues, bad model names, auth failures, or
+import errors. Check progress every 30–60 seconds during startup and smoke
+runs, then at least every few minutes during longer batches. Kill the run
+quickly (`Ctrl-C` or terminate the process) if fatal errors repeat, retry
+messages are identical, or no new proposal/evaluation/generation progress is
+visible. Fix the root cause before re-running.
 
 ## Workflow
 
-1. Create a dedicated task workspace, e.g.
-   `shinka_tasks/<theme_name>_self_play_novelty/`.
+1. Create a dedicated run scaffold directory, e.g.
+   `shinka_tasks/<theme_name>_self_play_novelty/scaffold/`, and run Shinka
+   commands from that directory.
 2. Copy templates:
    - `templates/seed_svg_template.py` → `initial.py`
    - `templates/evaluator_template.py` → `evaluate.py`
@@ -202,7 +260,8 @@ on transient LLM API failures, quota issues, or bad model names.
    - `templates/shinka_config_template.yaml` → `shinka.yaml`
    - `templates/run_self_play_novelty.py` → `run_self_play_novelty.py`
 3. Fill `rubric.md` with the creative brief, criteria, and defaults used.
-4. Put baseline PNG/SVG images in `opponents/`.
+4. Put baseline 2x2 gallery PNGs in `opponents/`. Each gallery is one
+   opponent.
 5. Smoke-test the evaluator:
 
 ```bash
@@ -210,7 +269,9 @@ python evaluate.py --program_path initial.py --results_dir /tmp/self_play_novelt
 ```
 
 Confirm `metrics.json` contains `combined_score`, per-criterion public scores,
-private game records, and usable `text_feedback`.
+private game records, `extra_data.image_path` pointing at `gallery.png`, and
+usable `text_feedback`. The smoke-test `results_dir` should contain
+`sample_01.png` through `sample_04.png` plus `gallery.png`.
 
 6. Run a 2-generation smoke batch before the full loop:
 
@@ -218,11 +279,17 @@ private game records, and usable `text_feedback`.
 shinka run --config shinka.yaml --num-generations 2
 ```
 
+Monitor this smoke run frequently and kill it quickly if it repeats fatal
+errors or stops making proposal/evaluation/generation progress.
+
 7. Run the multi-round loop and promote top images between rounds:
 
 ```bash
 python run_self_play_novelty.py --rounds 3 --generations-per-round 20
 ```
+
+Apply the same frequent-monitoring rule to the round helper; ShinkaEvolve may
+keep retrying inside a round after a fatal error instead of exiting cleanly.
 
 8. After the run, report the top images, score trajectory, promoted pool
 changes, and any judge caveats.

@@ -161,18 +161,20 @@ Two files in the output directory:
     - if `domain_pattern == game-agent-policy` and the user agrees:
       `shinka-self-play`.
     The handoff is the end of this skill's responsibility — the native skill
-    owns the task scaffold from there, and `shinka-run` / `shinka-inspect`
-    take over for execution and review.
+    owns creating a dedicated run scaffold under `shinka_tasks/<task>/scaffold/`,
+    and `shinka-run` / `shinka-inspect` take over for execution and review.
 
 ## ShinkaEvolve Retry Behavior
 
-ShinkaEvolve may enter an infinite retry loop on transient errors (LLM
-API failures, rate limits, network issues) rather than exiting
-immediately. When running downstream Shinka tasks from scan results,
-actively monitor log output during smoke tests and evolution runs.
-Interrupt (`Ctrl-C`) if the process appears stuck retrying, fix the
-underlying issue (wrong API key, quota exhausted, model name typo,
-etc.), and re-run.
+ShinkaEvolve may not exit immediately even when a fatal error has
+occurred. When running downstream Shinka tasks from scan results,
+actively monitor log output during smoke tests and evolution runs:
+check progress every 30–60 seconds during startup and smoke runs, then
+at least every few minutes during longer batches. Interrupt (`Ctrl-C`)
+or terminate the process if fatal errors repeat, retry messages are
+identical, or no new proposal/evaluation/generation progress is
+visible. Fix the underlying issue (wrong API key, quota exhausted,
+model name typo, import error, etc.) and re-run.
 
 ## Files
 

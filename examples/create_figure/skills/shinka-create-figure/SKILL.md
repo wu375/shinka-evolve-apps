@@ -143,12 +143,15 @@ Detect support by checking whether the native client exposes a multimodal conten
 1. Gather the research context and figure description from the user — via conversation, provided files, or a mix.
 2. Apply defaults for all unspecified inputs (audience, data policy, judge model). Record which defaults were applied.
 3. Use `uv` for package management unless the user or project explicitly uses something else.
-4. Create a **dedicated task workspace directory** for all scaffolded
-   files (e.g. `shinka_tasks/<figure_name>/`). All generated files —
+4. Create a **dedicated run scaffold directory** under `shinka_tasks/`
+   for all scaffolded files, e.g.
+   `shinka_tasks/<figure_name>/scaffold/`. All generated files —
    `initial.py`, `evaluate.py`, `context.md`, `rubric.md`,
-   `shinka.yaml`, and the evolution `results/` directory — live here.
+   `shinka.yaml`, and the evolution `results/` directory — live in this
+   scaffold directory. Run Shinka commands from this directory unless the
+   installed ShinkaEvolve version requires an explicit workspace flag.
    Ensure a `.env` with the necessary API keys is reachable (in the
-   workspace dir or any parent).
+   scaffold dir or any parent).
 5. Copy `templates/seed_figure_template.py` → `initial.py`. The seed
    includes both SVG helpers and a matplotlib path. Do not delete either
    path — candidates may combine SVG elements and matplotlib plots in a
@@ -181,12 +184,11 @@ Detect support by checking whether the native client exposes a multimodal conten
    `metrics.json` has `combined_score`/`public`/`private`/`text_feedback`,
    `correct.json` has `correct`/`error`.
 
-   **Important:** ShinkaEvolve may enter an infinite retry loop when it
-   encounters transient errors (e.g. LLM API failures, rate limits,
-   network issues) rather than exiting immediately. During smoke tests,
-   actively monitor the log output and interrupt (`Ctrl-C`) if the
-   process appears stuck retrying. Fix the underlying issue (wrong API
-   key, quota exhausted, model name typo, etc.) before re-running.
+   **Important:** ShinkaEvolve may not exit immediately even when a
+   fatal error has occurred. During smoke tests, actively monitor log
+   output and interrupt (`Ctrl-C`) if retry output repeats without new
+   progress. Fix the underlying issue (wrong API key, quota exhausted,
+   model name typo, etc.) before re-running.
 
    Then **iterate on the judge prompt and rubric** until scoring is strict
    enough to produce meaningful feedback signals:
@@ -217,12 +219,22 @@ Detect support by checking whether the native client exposes a multimodal conten
     Confirm both generations produce valid candidates with non-trivial
     `combined_score` values and readable `text_feedback`. If any
     generation fails or produces zero-score results, fix the issue
-    before proceeding. Monitor logs and interrupt (`Ctrl-C`) if Shinka
-    appears stuck in a retry loop.
+    before proceeding.
+
+    **Monitoring requirement:** ShinkaEvolve may not exit immediately
+    even when a fatal error has occurred. Watch progress frequently
+    during smoke and full runs: check logs every 30–60 seconds during
+    startup and smoke runs, then at least every few minutes during
+    longer batches. Kill the run quickly (`Ctrl-C` or terminate the
+    process) if you see repeated fatal errors such as authentication
+    failures, quota exhaustion, invalid model names, import errors, or
+    identical retry messages with no new proposal/evaluation/generation
+    progress. Fix the root cause before re-running.
 
 12. Hand off to `shinka-run` for the full evolution batch. Monitor the
-    log during the run — ShinkaEvolve may silently retry on LLM errors
-    instead of exiting. Interrupt and fix if the run appears stuck.
+    log during the run using the same frequent-monitoring rule above.
+    Kill the run quickly and fix the root cause if progress stalls on
+    fatal retry output.
 13. After a run, use `shinka-inspect` to extract top candidates and
     re-render them. Provide a **concise post-run summary** including:
 
