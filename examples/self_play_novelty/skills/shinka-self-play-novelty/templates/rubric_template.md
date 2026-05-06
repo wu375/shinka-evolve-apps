@@ -1,8 +1,8 @@
 # Self-Play Novelty Rubric (TEMPLATE)
 
-> The judge receives multiple image inputs in shuffled order. The prompt maps
-> those inputs to Image 1, Image 2, ... The judge does not know which image is
-> the candidate.
+> The judge receives multiple 2x2 gallery image inputs in shuffled order. The
+> prompt maps those inputs to Image 1, Image 2, ... The judge does not know
+> which gallery is the candidate.
 
 ## Creative Brief
 
@@ -11,13 +11,13 @@ target image. -->
 
 ## Evaluation Goal
 
-Reward images that would strengthen the opponent pool: visually compelling,
+Reward galleries that would strengthen the opponent pool: visually compelling,
 meaningfully different from existing pool members, and likely to push future
-candidates toward richer generative mechanisms.
+candidates toward richer generative mechanisms across stochastic samples.
 
 ## Criteria
 
-The judge must rank all images independently for each criterion:
+The judge must rank all gallery images independently for each criterion:
 
 - `divergence` — meaningful visual difference from the other images; not just
   minor palette or layout variation.
@@ -38,7 +38,7 @@ The judge must rank all images independently for each criterion:
   the number of images provided.
 - The rank arrays must be in input image order: Image 1, Image 2, ...
 - Do not tie ranks.
-- Judge only the visible images, not source code or assumed generation history.
+- Judge only the visible galleries, not source code or assumed generation history.
 - Penalize broken rendering, unreadable clutter, low-effort templates, and
   random noise without visual intent.
 

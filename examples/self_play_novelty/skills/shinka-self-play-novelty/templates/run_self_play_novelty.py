@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Round helper for self-play novelty image pools.
+"""Round helper for self-play novelty gallery pools.
 
-This script keeps the opponent pool fixed during each ShinkaEvolve run, then
-promotes top rendered candidate images into the pool for the next round.
-Adjust the `shinka run` command if your installed CLI uses different flags.
+Keeps the opponent pool fixed during each ShinkaEvolve run, then promotes
+top rendered candidate galleries into the pool for the next round.
+
+Usage:
+  python run_self_play_novelty.py --workspace <task_dir> --rounds 3 \
+      --generations-per-round 20 --top-k 2
+
+The shinka_run CLI is called as:
+  shinka_run --task-dir <workspace> --results_dir <round_dir>/results \
+             --num_generations <N> --config-fname shinka.yaml
 """
 
 from __future__ import annotations
@@ -12,6 +19,7 @@ import argparse
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -26,9 +34,21 @@ def snapshot_pool(workspace: Path, round_dir: Path) -> Path:
     return snapshot
 
 
-def run_shinka(workspace: Path, config: Path, generations: int) -> None:
-    cmd = ["shinka", "run", "--config", str(config), "--num-generations", str(generations)]
-    subprocess.run(cmd, cwd=workspace, check=True)
+def run_shinka(workspace: Path, results_dir: Path, generations: int) -> None:
+    # Locate shinka_run: prefer the same Python env's bin directory.
+    python = Path(sys.executable)
+    shinka_run = python.parent / "shinka_run"
+    if not shinka_run.exists():
+        shinka_run = shutil.which("shinka_run") or "shinka_run"
+
+    cmd = [
+        str(shinka_run),
+        "--task-dir", str(workspace),
+        "--results_dir", str(results_dir),
+        "--num_generations", str(generations),
+        "--config-fname", "shinka.yaml",
+    ]
+    subprocess.run(cmd, check=True)
 
 
 def score_from_metrics(path: Path) -> float:
@@ -47,6 +67,7 @@ def image_from_metrics(metrics_path: Path) -> Path | None:
 
     candidates = [
         data.get("extra_data", {}).get("image_path"),
+        data.get("private", {}).get("target_gallery"),
         data.get("private", {}).get("target_png"),
     ]
     for value in candidates:
@@ -58,18 +79,27 @@ def image_from_metrics(metrics_path: Path) -> Path | None:
         if path.exists() and path.suffix.lower() == ".png":
             return path
 
-    fallback = metrics_path.parent / "target.png"
-    if fallback.exists():
-        return fallback
+    for fallback_name in ("gallery.png", "target.png"):
+        fallback = metrics_path.parent / fallback_name
+        if fallback.exists():
+            return fallback
     return None
 
 
 def collect_top_images(results_root: Path, top_k: int) -> list[tuple[float, Path]]:
+    """Return top-k (score, gallery_png) pairs, deduplicated by image path.
+
+    Deduplication is required because Shinka may write metrics.json to both
+    gen_N/results/ and best/results/, both pointing to the same gallery PNG.
+    Without dedup, two promotion slots would go to the same image.
+    """
+    seen: set[Path] = set()
     scored: list[tuple[float, Path]] = []
     for metrics_path in results_root.glob("**/metrics.json"):
         image = image_from_metrics(metrics_path)
-        if image is None:
+        if image is None or image in seen:
             continue
+        seen.add(image)
         scored.append((score_from_metrics(metrics_path), image))
     scored.sort(key=lambda item: item[0], reverse=True)
     return scored[:top_k]
@@ -88,6 +118,7 @@ def promote_images(
         dest = opponents / f"round_{round_idx:03d}_rank_{rank:02d}_score_{score:.3f}.png"
         shutil.copy2(image, dest)
         promoted.append(dest)
+        print(f"  [pool] promoted rank {rank} (score={score:.3f}) → {dest.name}")
 
     non_baselines = sorted(
         [p for p in opponents.glob("*.png") if not p.name.startswith("baseline_")],
@@ -96,40 +127,62 @@ def promote_images(
     while len(non_baselines) > max_promoted:
         old = non_baselines.pop(0)
         old.unlink(missing_ok=True)
+        print(f"  [pool] evicted {old.name}")
+
+    pool = list(opponents.glob("*.png"))
+    baselines = sum(1 for p in pool if p.name.startswith("baseline_"))
+    print(f"  [pool] pool now has {len(pool)} images ({baselines} baselines)")
     return promoted
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--workspace", type=Path, default=Path("."))
-    parser.add_argument("--config", type=Path, default=Path("shinka.yaml"))
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--generations-per-round", type=int, default=20)
     parser.add_argument("--top-k", type=int, default=2)
     parser.add_argument("--rounds-kept", type=int, default=3)
-    parser.add_argument("--results-root", type=Path, default=Path("results"))
     args = parser.parse_args()
 
     workspace = args.workspace.resolve()
-    config = args.config if args.config.is_absolute() else workspace / args.config
-    results_root = args.results_root if args.results_root.is_absolute() else workspace / args.results_root
     max_promoted = args.top_k * args.rounds_kept
+    rounds_dir = workspace / "rounds"
+    rounds_dir.mkdir(exist_ok=True)
 
     for round_idx in range(1, args.rounds + 1):
-        round_dir = workspace / "rounds" / f"round_{round_idx:03d}"
-        round_dir.mkdir(parents=True, exist_ok=True)
+        print(f"\n{'='*60}")
+        print(f"ROUND {round_idx}/{args.rounds}")
+        print(f"{'='*60}")
+
+        round_dir = rounds_dir / f"round_{round_idx:03d}"
+        round_dir.mkdir(exist_ok=True)
+        results_dir = round_dir / "results"
+
         snapshot = snapshot_pool(workspace, round_dir)
-        print(f"[round {round_idx}] snapshotted pool to {snapshot}")
+        print(f"  [pool] snapshotted {len(list(snapshot.iterdir()))} images → {snapshot.name}/")
 
-        run_shinka(workspace, config, args.generations_per_round)
+        # Delete DB so each round starts fresh with no stale ancestry.
+        db_path = workspace / "evolution_db.sqlite"
+        if db_path.exists():
+            db_path.unlink()
 
-        top_images = collect_top_images(results_root, args.top_k)
-        promoted = promote_images(workspace, round_idx, top_images, max_promoted)
-        (round_dir / "promoted.json").write_text(
-            json.dumps([str(p) for p in promoted], indent=2),
-            encoding="utf-8",
-        )
-        print(f"[round {round_idx}] promoted {len(promoted)} images")
+        run_shinka(workspace, results_dir, args.generations_per_round)
+
+        top_images = collect_top_images(results_dir, args.top_k)
+        if not top_images:
+            print("  [warn] no scored images found to promote")
+        else:
+            promote_images(workspace, round_idx, top_images, max_promoted)
+
+        manifest = [{"score": s, "image": str(p)} for s, p in top_images]
+        (round_dir / "promoted.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    print(f"\n{'='*60}")
+    print("ALL ROUNDS COMPLETE")
+    pool = list((workspace / "opponents").glob("*.png"))
+    print(f"Final pool: {len(pool)} images")
+    for p in sorted(pool):
+        print(f"  {p.name}")
 
 
 if __name__ == "__main__":

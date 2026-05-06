@@ -70,13 +70,19 @@ Defaults:
 Every candidate is a single Python file exposing:
 
 ```python
+# EVOLVE-BLOCK-START
 def generate_svg(rng: int) -> str:
     """Return a complete, self-contained SVG artwork."""
+# EVOLVE-BLOCK-END
 ```
 
-The evaluator calls `generate_svg(seed)` four times with deterministic seeds,
-validates each SVG, renders each sample to PNG, composes the four PNGs into
-`gallery.png`, and uses that gallery as the hidden target in each ranking game.
+**The `EVOLVE-BLOCK-START / EVOLVE-BLOCK-END` markers in `initial.py` are
+mandatory.** `apply_full_patch` calls `_mutable_ranges()` on the original file
+to locate the region to replace. If no markers are present it returns
+`"No EVOLVE-BLOCK regions found in original content"` and every proposal fails.
+The seed_svg_template.py already includes these markers — do not remove them.
+
+The evaluator calls `generate_svg(seed)` four times with deterministic seeds.
 The function should be stochastic with respect to the seed so the gallery shows
 meaningful variation across samples.
 
@@ -85,7 +91,7 @@ SVG constraints:
 - valid XML with an `<svg>` root,
 - includes `viewBox` or width/height,
 - no scripts, event handlers, external links, `data:` URLs, or `foreignObject`,
-- bounded output size and element count.
+- all imports inside the function body (Shinka runs the function in isolation).
 
 ## Evaluator Contract
 
@@ -144,6 +150,7 @@ Return Shinka-compatible metrics:
     "pool_size": 0,
     "target_gallery": "results/gen_x/gallery.png"
   },
+  "extra_data": {"image_path": "results/gen_x/gallery.png"},
   "text_feedback": "concise score summary and improvement directions"
 }
 ```
@@ -160,71 +167,168 @@ Workspace layout:
 
 ```text
 shinka_tasks/<theme_name>_self_play_novelty/
-  scaffold/
-    initial.py
-    evaluate.py
-    rubric.md
-    shinka.yaml
-    run_self_play_novelty.py
-    opponents/
-      baseline_001.png  # 2x2 gallery
-      baseline_002.png  # 2x2 gallery
-    results/
-      gen_x/
-        gallery.png
-        sample_01.png
-        sample_02.png
-        sample_03.png
-        sample_04.png
-  rounds/
-    round_001/
-      pool_snapshot/
-      promoted/
-```
-
-Use `scaffold/` as the ShinkaEvolve working directory unless the installed
-version requires an explicit workspace flag. The `results/gen_x/` folders are
-created under `scaffold/` so each generation keeps its rendered gallery PNG.
-
-Legacy flat layouts are acceptable only when adapting an existing task; new
-scaffolds should use the `shinka_tasks/<task>/scaffold/` convention above.
-
-For compact examples, `<task_workspace>` below refers to that `scaffold/`
-directory:
-
-```text
-<task_workspace>/
-  initial.py
+  initial.py         ← must have EVOLVE-BLOCK-START/END markers
   evaluate.py
   rubric.md
   shinka.yaml
+  run_self_play_novelty.py
   opponents/
     baseline_001.png  # 2x2 gallery
     baseline_002.png  # 2x2 gallery
+  galleries/          # auto-created; one gallery PNG per evaluated generation
   rounds/
     round_001/
       pool_snapshot/
       results/
-        gen_x/
-          gallery.png
-          sample_01.png
-          sample_02.png
-          sample_03.png
-          sample_04.png
-      promoted/
+        gen_0/
+          results/
+            gallery.png
+            metrics.json
+      promoted.json
 ```
 
 For round `N`:
 
 1. copy `opponents/` to `rounds/round_N/pool_snapshot/`,
-2. configure the evaluator to read that snapshot,
-3. run one ShinkaEvolve batch,
-4. collect top candidate gallery PNGs from the round results,
+2. delete `evolution_db.sqlite` so each round starts with a clean ancestry,
+3. run one ShinkaEvolve batch writing results to `rounds/round_N/results/`,
+4. collect top candidate gallery PNGs — **deduplicated by image path** (Shinka
+   may write metrics.json to both `gen_N/results/` and `best/results/`, both
+   pointing at the same gallery; without dedup two promotion slots go to the
+   same image),
 5. promote top-K gallery PNGs into `opponents/`,
 6. apply a fixed-size sliding window to old non-baseline opponents.
 
 Baseline gallery images should be marked with a `baseline_` prefix and kept
 forever. Promoted galleries should include round and rank in their filename.
+
+## Known Pitfalls
+
+### SVG renderer: use rsvg-convert, not cairosvg
+
+**cairosvg silently renders `hsl()` CSS colors as black** — the image is
+rendered but all hsl-colored elements appear as solid black, making evaluation
+meaningless. Use `rsvg-convert` as the primary renderer. The evaluator template
+puts rsvg-convert first and falls back to ImageMagick, then cairosvg as a last
+resort. Install rsvg-convert via `brew install librsvg` (macOS) or
+`apt install librsvg2-bin` (Linux).
+
+### rubric.md path
+
+Shinka copies `evaluate.py` into a temporary results directory. `__file__`
+inside evaluate.py then points to that temp dir, not the task workspace, so
+`Path(__file__).parent / "rubric.md"` will fail. The evaluator template
+searches for `rubric.md` by walking upward from `pool_dir.parent` (the task
+workspace, derivable from the absolute `opponents_dir` argument) and from
+`results_dir` parents. This finds rubric.md regardless of where the evaluator
+copy lives.
+
+### EVOLVE-BLOCK markers in initial.py
+
+The full-patch applier looks for `EVOLVE-BLOCK-START / EVOLVE-BLOCK-END`
+markers in the original file to locate the mutable region. Without them every
+proposal fails with `"No EVOLVE-BLOCK regions found in original content"`.
+Wrap the entire `generate_svg` function in these markers in `initial.py`.
+
+### LLM generating EVOLVE markers in proposals
+
+Despite the markers being required in `initial.py`, the proposal LLM sometimes
+generates `# EVOLVE-BLOCK-START/END` comments **inside** the generated function
+body. The regex `(?:#|//|)?\s*EVOLVE-BLOCK-*` matches Python comment style, so
+inner markers cause `patch_has_both=True`, extracting only the inner section
+and discarding the rest of the generated function. Prevent this with an explicit
+system-prompt rule:
+
+```
+FORMATTING RULE: Output ONLY the complete Python function. Do NOT include
+EVOLVE-BLOCK-START, EVOLVE-BLOCK-END, or any other special block markers.
+Do NOT include markdown fences or any text outside the function definition.
+```
+
+### shinka_run CLI flags
+
+The CLI is `shinka_run` (not `shinka run`). Flag names differ from older docs:
+
+```bash
+shinka_run \
+  --task-dir <workspace> \
+  --results_dir <results_dir> \
+  --num_generations <N> \
+  --config-fname shinka.yaml
+```
+
+Note: `--results_dir` uses an underscore; `--task-dir` uses a hyphen.
+
+### shinka.yaml: opponents_dir must be an absolute path
+
+Shinka copies `evaluate.py` to a temp directory and runs it from there.
+Relative `opponents_dir` paths resolve against that temp dir, not the task
+workspace, and will fail with "opponent pool not found". Always use an absolute
+path in `job_config.extra_cmd_args.opponents_dir`.
+
+### shinka.yaml: do not put thinking_budget in llm_kwargs
+
+Adding `thinking_budget: 0` to the YAML `llm_kwargs` block causes:
+`AsyncLLMClient.__init__() got an unexpected keyword argument 'thinking_budget'`.
+ShinkaEvolve automatically sets `thinking_budget=0` as a query-time kwarg for
+models classified as reasoning models when `reasoning_efforts="disabled"`.
+Do not configure it in the YAML.
+
+### SVG size limit
+
+The default `max_svg_characters` limit of 50,000 is too small for legitimate
+complex artwork. Programs that approximate smooth curves as polylines (many `L`
+lineto commands) or render large grids of elements can easily produce 500K–1M
+character SVGs. Since SVG rendering is a local deterministic operation (no API
+cost or network overhead), raise the limit to **2,000,000** characters. The
+`text_feedback` from a failed evaluation will include the actual character count
+so the LLM can self-correct.
+
+### Judge timeout for Vertex AI
+
+On Vertex AI, TCP connections can enter a zombie state and the judge call hangs
+indefinitely. Wrap the judge call in a `ThreadPoolExecutor` with a 90-second
+timeout:
+
+```python
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    return executor.submit(_call).result(timeout=90)
+```
+
+### shinka.yaml config format
+
+Use `job_config.extra_cmd_args` to pass evaluator arguments, not the old
+`evaluate_function:` block format. The working format:
+
+```yaml
+job_config:
+  python_executable: /absolute/path/to/.venv/bin/python
+  extra_cmd_args:
+    opponents_dir: /absolute/path/to/opponents
+    n_opponents: 3
+    n_games: 2
+    base_seed: 42
+    judge_model: gemini-3-flash-preview
+```
+
+### Debugging Gemini None responses
+
+When Shinka retries indefinitely, the cause is often `candidates=None` from
+Gemini (safety filter, quota, or transient error). To diagnose, add logging
+to ShinkaEvolve's `shinka/llm/providers/gemini.py` in
+`gemini_extract_thoughts_and_content`:
+
+```python
+def _log_raw_response(response):
+    logger.info(
+        f"RAW GEMINI RESPONSE | prompt_feedback={getattr(response,'prompt_feedback',None)!r} | "
+        f"candidates={getattr(response,'candidates',None)!r}"
+    )
+```
+
+Then inspect `finish_reason` and `safety_ratings` on each candidate.
+Since this is an editable install the change takes effect after restarting
+the shinka_run process.
 
 ## Tuning Guidance
 
@@ -250,56 +354,69 @@ visible. Fix the root cause before re-running.
 
 ## Workflow
 
-1. Create a dedicated run scaffold directory, e.g.
-   `shinka_tasks/<theme_name>_self_play_novelty/scaffold/`, and run Shinka
-   commands from that directory.
+1. Create a task workspace directory:
+   ```
+   shinka_tasks/<theme_name>_self_play_novelty/
+   ```
+
 2. Copy templates:
    - `templates/seed_svg_template.py` → `initial.py`
    - `templates/evaluator_template.py` → `evaluate.py`
    - `templates/rubric_template.md` → `rubric.md`
    - `templates/shinka_config_template.yaml` → `shinka.yaml`
    - `templates/run_self_play_novelty.py` → `run_self_play_novelty.py`
-3. Fill `rubric.md` with the creative brief, criteria, and defaults used.
-4. Put baseline 2x2 gallery PNGs in `opponents/`. Each gallery is one
-   opponent.
-5. Smoke-test the evaluator:
 
-```bash
-python evaluate.py --program_path initial.py --results_dir /tmp/self_play_novelty_smoke
-```
+3. Customize `shinka.yaml`:
+   - Set `task_sys_msg` theme description.
+   - Set `job_config.python_executable` to the venv python.
+   - Set `job_config.extra_cmd_args.opponents_dir` to the **absolute** path of
+     `opponents/`.
 
-Confirm `metrics.json` contains `combined_score`, per-criterion public scores,
-private game records, `extra_data.image_path` pointing at `gallery.png`, and
-usable `text_feedback`. The smoke-test `results_dir` should contain
-`sample_01.png` through `sample_04.png` plus `gallery.png`.
+4. Fill `rubric.md` with the creative brief and judging criteria.
 
-6. Run a 2-generation smoke batch before the full loop:
+5. Generate baseline 2x2 gallery PNGs using `rsvg-convert` (not cairosvg) and
+   put them in `opponents/` with `baseline_` prefix. Use at least `n_opponents`
+   images. Generate them with the same 2×2 layout (four seeds, one grid PNG)
+   so they match the candidate gallery format.
 
-```bash
-shinka run --config shinka.yaml --num-generations 2
-```
+6. Smoke-test the evaluator:
+   ```bash
+   python evaluate.py --program_path initial.py \
+       --results_dir /tmp/self_play_novelty_smoke \
+       --opponents_dir /absolute/path/to/opponents
+   ```
+   Confirm `metrics.json` contains `combined_score`, per-criterion public
+   scores, private game records, `extra_data.image_path` pointing at
+   `gallery.png`, and usable `text_feedback`. Visually verify the gallery PNG
+   is not all-black (would indicate cairosvg HSL rendering bug).
 
-Monitor this smoke run frequently and kill it quickly if it repeats fatal
-errors or stops making proposal/evaluation/generation progress.
+7. Run a 2-generation smoke batch before the full loop:
+   ```bash
+   shinka_run --task-dir . --results_dir /tmp/smoke_results \
+              --num_generations 2 --config-fname shinka.yaml
+   ```
+   Monitor this smoke run frequently and kill it quickly if it repeats fatal
+   errors or stops making proposal/evaluation/generation progress.
 
-7. Run the multi-round loop and promote top images between rounds:
+8. Run the multi-round loop:
+   ```bash
+   python run_self_play_novelty.py --workspace . --rounds 3 \
+       --generations-per-round 20 --top-k 2
+   ```
+   Apply the same frequent-monitoring rule to the round helper.
 
-```bash
-python run_self_play_novelty.py --rounds 3 --generations-per-round 20
-```
-
-Apply the same frequent-monitoring rule to the round helper; ShinkaEvolve may
-keep retrying inside a round after a fatal error instead of exiting cleanly.
-
-8. After the run, report the top images, score trajectory, promoted pool
-changes, and any judge caveats.
+9. After the run, report the top images, score trajectory, promoted pool
+   changes, and any judge caveats. Rendered galleries are in `galleries/`
+   (one per generation) and `review/round_N/` (sorted by score).
 
 ## Files
 
 - `SKILL.md` — this file.
 - `templates/seed_svg_template.py` — starter candidate with
-  `generate_svg(rng)`.
-- `templates/evaluator_template.py` — ranking-based Gemini evaluator.
+  `generate_svg(rng)` wrapped in EVOLVE-BLOCK markers.
+- `templates/evaluator_template.py` — ranking-based Gemini evaluator with
+  rsvg-convert priority, judge timeout, rubric path search, and gallery copy.
 - `templates/rubric_template.md` — rubric and judge instructions template.
-- `templates/shinka_config_template.yaml` — low-budget local config template.
-- `templates/run_self_play_novelty.py` — fixed-pool multi-round helper.
+- `templates/shinka_config_template.yaml` — config using `job_config` format.
+- `templates/run_self_play_novelty.py` — fixed-pool multi-round helper with
+  correct `shinka_run` CLI, DB reset per round, and deduplication.

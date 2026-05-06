@@ -1,13 +1,15 @@
 """Self-play novelty evaluator for SVG/image ShinkaEvolve tasks.
 
-The evaluator renders the candidate SVG, samples opponent images from a fixed
-pool, shuffles the candidate among them, and asks Gemini to rank all images for
-each rubric criterion. The judge never sees which image is the candidate.
+The evaluator renders four stochastic candidate samples into a 2x2 gallery,
+samples gallery images from a fixed opponent pool, shuffles the candidate
+gallery among them, and asks Gemini to rank all galleries for each rubric
+criterion. The judge never sees which gallery is the candidate.
 """
 
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import importlib
 import importlib.util
 import json
@@ -24,8 +26,8 @@ from pathlib import Path
 from typing import Any
 
 
-RUBRIC_PATH = Path(__file__).parent / "rubric.md"
 JUDGE_MODEL = "gemini-3-flash-preview"
+JUDGE_TIMEOUT_SECONDS = 90
 FORBIDDEN_SVG_PATTERNS = (
     r"<\s*script\b",
     r"\bon\w+\s*=",
@@ -35,27 +37,44 @@ FORBIDDEN_SVG_PATTERNS = (
 
 
 def _load_dotenv_from_workspace(start: Path) -> None:
-    candidate: Path | None = None
     for d in [start, *start.parents]:
         p = d / ".env"
         if p.exists():
-            candidate = p
-            break
-    if candidate is None:
-        return
-    try:
-        from dotenv import load_dotenv
+            try:
+                from dotenv import load_dotenv
+                load_dotenv(p, override=False)
+                return
+            except Exception:
+                pass
+            for line in p.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+            return
 
-        load_dotenv(candidate, override=False)
-        return
-    except Exception:
-        pass
-    for line in candidate.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+def _find_rubric(pool_dir: Path, results_dir: Path) -> Path:
+    """Search for rubric.md in the task workspace.
+
+    Shinka copies evaluate.py to a temp results dir, so __file__ is unreliable.
+    Search upward from pool_dir.parent (the actual task workspace) and from
+    results_dir parents to handle various layouts.
+    """
+    search_dirs = [
+        Path(__file__).resolve().parent,
+        pool_dir.parent,
+        *Path(results_dir).resolve().parents,
+        Path(results_dir).resolve(),
+    ]
+    for d in search_dirs:
+        candidate = d / "rubric.md"
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        f"rubric.md not found. Searched: {[str(d) for d in search_dirs]}"
+    )
 
 
 def _import_candidate(program_path: str):
@@ -76,7 +95,6 @@ def _validate_svg(svg_text: str, max_characters: int) -> None:
     for pattern in FORBIDDEN_SVG_PATTERNS:
         if re.search(pattern, svg_text, flags=re.I):
             raise ValueError(f"SVG contains forbidden pattern: {pattern}")
-
     root = ET.fromstring(svg_text)
     tag = root.tag.rsplit("}", 1)[-1].lower()
     if tag != "svg":
@@ -86,19 +104,6 @@ def _validate_svg(svg_text: str, max_characters: int) -> None:
 
 
 def _render_svg_text_to_png(svg_text: str, png_path: Path, size: int = 1024) -> None:
-    try:
-        cairosvg = importlib.import_module("cairosvg")
-
-        cairosvg.svg2png(
-            bytestring=svg_text.encode("utf-8"),
-            write_to=str(png_path),
-            output_width=size,
-            output_height=size,
-        )
-        return
-    except Exception:
-        pass
-
     with tempfile.NamedTemporaryFile("w", suffix=".svg", delete=False, encoding="utf-8") as f:
         f.write(svg_text)
         svg_path = Path(f.name)
@@ -109,14 +114,8 @@ def _render_svg_text_to_png(svg_text: str, png_path: Path, size: int = 1024) -> 
 
 
 def _render_svg_file_to_png(svg_path: Path, png_path: Path, size: int = 1024) -> None:
-    try:
-        cairosvg = importlib.import_module("cairosvg")
-
-        cairosvg.svg2png(url=str(svg_path), write_to=str(png_path), output_width=size, output_height=size)
-        return
-    except Exception:
-        pass
-
+    # rsvg-convert is the preferred renderer: correctly handles hsl() CSS colors.
+    # cairosvg silently renders hsl() as black — do NOT use it as the primary renderer.
     rsvg_convert = shutil.which("rsvg-convert")
     if rsvg_convert:
         subprocess.run(
@@ -129,11 +128,25 @@ def _render_svg_file_to_png(svg_path: Path, png_path: Path, size: int = 1024) ->
 
     magick = shutil.which("magick") or shutil.which("convert")
     if magick:
-        cmd = [magick, str(svg_path), "-resize", f"{size}x{size}", str(png_path)]
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        subprocess.run(
+            [magick, str(svg_path), "-resize", f"{size}x{size}", str(png_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         return
 
-    raise RuntimeError("No SVG renderer found. Install cairosvg, rsvg-convert, or ImageMagick.")
+    try:
+        cairosvg = importlib.import_module("cairosvg")
+        cairosvg.svg2png(url=str(svg_path), write_to=str(png_path), output_width=size, output_height=size)
+        return
+    except Exception:
+        pass
+
+    raise RuntimeError(
+        "No SVG renderer found. Install rsvg-convert (recommended) or ImageMagick. "
+        "cairosvg silently renders hsl() colors as black and is only used as last resort."
+    )
 
 
 def _ensure_png(image_path: Path, work_dir: Path, label: str) -> Path:
@@ -145,6 +158,33 @@ def _ensure_png(image_path: Path, work_dir: Path, label: str) -> Path:
         _render_svg_file_to_png(image_path, png_path)
         return png_path
     raise ValueError(f"Unsupported opponent image type: {image_path}")
+
+
+def _compose_gallery(sample_paths: list[Path], gallery_path: Path, tile_size: int = 1024) -> None:
+    if len(sample_paths) != 4:
+        raise ValueError("Gallery composition expects exactly 4 sample PNGs")
+    try:
+        from PIL import Image
+        canvas = Image.new("RGB", (tile_size * 2, tile_size * 2), "white")
+        for idx, sample_path in enumerate(sample_paths):
+            with Image.open(sample_path) as image:
+                tile = image.convert("RGB").resize((tile_size, tile_size))
+            x = (idx % 2) * tile_size
+            y = (idx // 2) * tile_size
+            canvas.paste(tile, (x, y))
+        canvas.save(gallery_path)
+        return
+    except Exception:
+        pass
+
+    magick = shutil.which("magick") or shutil.which("montage")
+    if magick:
+        cmd = [magick, "montage", *[str(p) for p in sample_paths],
+               "-tile", "2x2", "-geometry", f"{tile_size}x{tile_size}+0+0", str(gallery_path)]
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return
+
+    raise RuntimeError("No gallery composer found. Install Pillow or ImageMagick.")
 
 
 def _read_json_response(text: str) -> dict[str, Any]:
@@ -171,33 +211,41 @@ Rank 1 is best. Use every rank from 1 to {num_images} exactly once per criterion
 
 
 def _judge_images(
-    image_paths: list[Path], rubric_text: str, model: str
+    image_paths: list[Path],
+    rubric_text: str,
+    judge_model: str,
 ) -> dict[str, Any]:
-    from google import genai
-    from google.genai import types
+    """Call Gemini judge with a timeout to prevent TCP zombie hangs (Vertex AI)."""
+    def _call() -> dict[str, Any]:
+        # Use ShinkaEvolve's internal LLMClient so image transport, retries,
+        # and auth are handled consistently with the rest of the pipeline.
+        from shinka.llm import LLMClient
 
-    client = genai.Client()
-    contents: list[Any] = [
-        types.Part.from_bytes(data=image_path.read_bytes(), mime_type="image/png")
-        for image_path in image_paths
-    ]
-    contents.append(_build_judge_prompt(rubric_text, num_images=len(image_paths)))
-    response = client.models.generate_content(
-        model=model,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            temperature=0.0,
-            response_mime_type="application/json",
-        ),
-    )
-    return _read_json_response(response.text or "{}")
+        client = LLMClient(
+            model=judge_model,
+            temperatures=[0.0],
+            max_tokens=8192,
+        )
+        sampled_kwargs = client.get_kwargs()
+        sampled_kwargs["images"] = image_paths
+        sampled_kwargs["thinking_budget"] = 0
+
+        result = client.query(
+            msg=_build_judge_prompt(rubric_text, len(image_paths)),
+            system_msg="You are a visual novelty judge. Return only valid JSON.",
+            llm_kwargs=sampled_kwargs,
+        )
+        return _read_json_response(result.content or "{}")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_call)
+        return future.result(timeout=JUDGE_TIMEOUT_SECONDS)
 
 
 def _validate_ranks(judge_result: dict[str, Any], num_images: int) -> dict[str, list[int]]:
     ranks = judge_result.get("ranks", judge_result)
     if not isinstance(ranks, dict):
         raise ValueError("Judge response must include a ranks object")
-
     expected = set(range(1, num_images + 1))
     normalized: dict[str, list[int]] = {}
     for criterion, values in ranks.items():
@@ -207,7 +255,6 @@ def _validate_ranks(judge_result: dict[str, Any], num_images: int) -> dict[str, 
         if set(ints) != expected:
             raise ValueError(f"Criterion {criterion!r} must use ranks 1..{num_images} exactly once")
         normalized[str(criterion)] = ints
-
     if not normalized:
         raise ValueError("Judge returned no rank criteria")
     return normalized
@@ -217,8 +264,7 @@ def _collect_opponents(opponents_dir: Path) -> list[Path]:
     if not opponents_dir.exists():
         raise FileNotFoundError(f"Opponent pool not found: {opponents_dir}")
     images = [
-        p
-        for p in sorted(opponents_dir.iterdir())
+        p for p in sorted(opponents_dir.iterdir())
         if p.is_file() and p.suffix.lower() in {".png", ".svg"}
     ]
     if not images:
@@ -234,6 +280,31 @@ def _candidate_svg(module: Any, seed: int) -> str:
         if isinstance(outputs, list) and outputs:
             return outputs[0]
     raise AttributeError("Candidate must expose generate_svg(rng: int) -> str")
+
+
+def _candidate_gallery(
+    module: Any,
+    base_seed: int,
+    results_dir: Path,
+    max_svg_characters: int,
+    sample_count: int = 4,
+) -> tuple[Path, list[dict[str, Any]]]:
+    sample_records: list[dict[str, Any]] = []
+    sample_pngs: list[Path] = []
+    for sample_idx in range(sample_count):
+        seed = int(base_seed) + sample_idx
+        svg_text = _candidate_svg(module, seed)
+        _validate_svg(svg_text, max_characters=max_svg_characters)
+        svg_path = results_dir / f"sample_{sample_idx + 1:02d}.svg"
+        png_path = results_dir / f"sample_{sample_idx + 1:02d}.png"
+        svg_path.write_text(svg_text, encoding="utf-8")
+        _render_svg_text_to_png(svg_text, png_path)
+        sample_pngs.append(png_path)
+        sample_records.append({"seed": seed, "svg_path": str(svg_path), "png_path": str(png_path)})
+
+    gallery_path = results_dir / "gallery.png"
+    _compose_gallery(sample_pngs, gallery_path)
+    return gallery_path, sample_records
 
 
 def _write_outputs(results_dir: Path, metrics: dict[str, Any], correct: bool, error: str) -> None:
@@ -263,33 +334,41 @@ def evaluate_self_play_novelty(
     n_games: int = 2,
     base_seed: int = 42,
     judge_model: str = JUDGE_MODEL,
-    max_svg_characters: int = 50000,
+    max_svg_characters: int = 2_000_000,
 ) -> dict[str, Any]:
+    # Brief pause so asyncio on macOS can register its SIGCHLD handler before
+    # we exit — prevents process.wait() hanging on fast-failing candidates.
+    import time as _time
+    _time.sleep(2)
+
     _load_dotenv_from_workspace(Path(__file__).resolve().parent)
+    _load_dotenv_from_workspace(Path(results_dir).resolve())
+
     rdir = Path(results_dir)
     rdir.mkdir(parents=True, exist_ok=True)
 
     try:
         module = _import_candidate(program_path)
         target_seed = int(base_seed)
-        svg_text = _candidate_svg(module, target_seed)
-        _validate_svg(svg_text, max_svg_characters)
-
-        target_svg = rdir / "target.svg"
-        target_png = rdir / "target.png"
-        target_svg.write_text(svg_text, encoding="utf-8")
-        _render_svg_text_to_png(svg_text, target_png)
 
         pool_dir = Path(opponents_dir)
         if not pool_dir.is_absolute():
-            pool_dir = Path(__file__).resolve().parent / pool_dir
+            pool_dir = Path(__file__).resolve().parent / opponents_dir
         opponents = _collect_opponents(pool_dir)
         if len(opponents) < n_opponents:
             raise ValueError(
                 f"Need at least {n_opponents} opponents, found {len(opponents)} in {pool_dir}"
             )
 
-        rubric_text = RUBRIC_PATH.read_text(encoding="utf-8")
+        rubric_text = _find_rubric(pool_dir, results_dir).read_text(encoding="utf-8")
+
+        target_gallery, target_samples = _candidate_gallery(
+            module=module,
+            base_seed=target_seed,
+            results_dir=rdir,
+            max_svg_characters=max_svg_characters,
+        )
+
         per_criterion_scores: dict[str, list[float]] = {}
         target_ranks: list[int] = []
         first_places = 0
@@ -302,7 +381,9 @@ def evaluate_self_play_novelty(
             work_dir = rdir / f"game_{game_idx + 1:02d}"
             work_dir.mkdir(parents=True, exist_ok=True)
 
-            items: list[dict[str, Any]] = [{"kind": "target", "source": str(target_png), "png_path": target_png}]
+            items: list[dict[str, Any]] = [
+                {"kind": "target", "source": str(target_gallery), "png_path": target_gallery}
+            ]
             for opp_idx, opp_path in enumerate(sampled):
                 png_path = _ensure_png(opp_path, work_dir, f"opponent_{opp_idx + 1:02d}")
                 items.append({"kind": "opponent", "source": str(opp_path), "png_path": png_path})
@@ -311,11 +392,7 @@ def evaluate_self_play_novelty(
             target_index = next(i for i, item in enumerate(items) if item["kind"] == "target")
             ordered_image_paths = [Path(item["png_path"]) for item in items]
 
-            judge_result = _judge_images(
-                image_paths=ordered_image_paths,
-                rubric_text=rubric_text,
-                model=judge_model,
-            )
+            judge_result = _judge_images(ordered_image_paths, rubric_text, judge_model)
             ranks = _validate_ranks(judge_result, len(items))
 
             criterion_records = {}
@@ -332,15 +409,13 @@ def evaluate_self_play_novelty(
                     "normalized_score": float(score),
                 }
 
-            game_records.append(
-                {
-                    "game": game_idx + 1,
-                    "image_paths": [str(p) for p in ordered_image_paths],
-                    "target_index": target_index + 1,
-                    "opponents": [str(p) for p in sampled],
-                    "criteria": criterion_records,
-                }
-            )
+            game_records.append({
+                "game": game_idx + 1,
+                "image_paths": [str(p) for p in ordered_image_paths],
+                "target_index": target_index + 1,
+                "opponents": [str(p) for p in sampled],
+                "criteria": criterion_records,
+            })
 
         public = {
             criterion: sum(values) / len(values)
@@ -365,13 +440,27 @@ def evaluate_self_play_novelty(
                 "games": game_records,
                 "pool_size": len(opponents),
                 "target_seed": target_seed,
-                "target_png": str(target_png),
+                "target_gallery": str(target_gallery),
+                "target_samples": target_samples,
             },
-            "extra_data": {"image_path": str(target_png)},
+            "extra_data": {"image_path": str(target_gallery)},
             "text_feedback": text_feedback,
         }
         _write_outputs(rdir, metrics, correct=True, error="")
+
+        # Copy gallery to top-level galleries/ dir for easy review across generations.
+        try:
+            combined_score_val = metrics["combined_score"]
+            galleries_out = pool_dir.parent / "galleries"
+            galleries_out.mkdir(parents=True, exist_ok=True)
+            gen_label = rdir.parent.name
+            dest = galleries_out / f"{gen_label}_score_{combined_score_val:.3f}.png"
+            shutil.copy2(target_gallery, dest)
+        except Exception:
+            pass
+
         return metrics
+
     except Exception:
         return _failure(rdir, traceback.format_exc())
 
@@ -385,6 +474,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_games", type=int, default=2)
     parser.add_argument("--base_seed", type=int, default=42)
     parser.add_argument("--judge_model", default=JUDGE_MODEL)
+    parser.add_argument("--max_svg_characters", type=int, default=2_000_000)
     args = parser.parse_args()
     evaluate_self_play_novelty(
         program_path=args.program_path,
@@ -394,4 +484,5 @@ if __name__ == "__main__":
         n_games=args.n_games,
         base_seed=args.base_seed,
         judge_model=args.judge_model,
+        max_svg_characters=args.max_svg_characters,
     )
